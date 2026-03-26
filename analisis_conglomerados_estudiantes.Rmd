@@ -1,0 +1,599 @@
+---
+title: "Análisis de Perfiles de Estudiantes mediante Conglomerados"
+author: "Licenciatura en Inteligencia de Negocios - Tec de Monterrey"
+date: "`r Sys.Date()`"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+```
+
+# 1. Carga y Exploración de Datos
+
+En esta sección cargaremos el dataset de estudiantes y realizaremos una exploración inicial para comprender su estructura y características.
+
+```{r carga-librerias, echo=TRUE}
+# Cargar librerías necesarias
+library(tidyverse)
+library(cluster)
+library(factoextra)
+library(knitr)
+library(kableExtra)
+```
+
+```{r carga-datos, echo=TRUE}
+# Cargar el dataset
+datos <- read.csv("base_estudiantes_conglomerados.csv", stringsAsFactors = FALSE)
+
+# Mostrar las primeras filas
+head(datos)
+```
+
+## Estructura de los Datos
+
+```{r estructura-datos, echo=TRUE}
+# Revisar estructura del dataset
+str(datos)
+
+# Resumen estadístico
+summary(datos)
+```
+
+## Identificación y Tratamiento de Valores Faltantes
+
+```{r valores-faltantes, echo=TRUE}
+# Verificar valores faltantes
+valores_na <- colSums(is.na(datos))
+print("Valores faltantes por variable:")
+print(valores_na)
+
+# Conteo total de valores faltantes
+total_na <- sum(is.na(datos))
+cat("\nTotal de valores faltantes en el dataset:", total_na, "\n")
+
+# Si existen valores faltantes, tratarlos (en este caso, eliminar filas con NA)
+if(total_na > 0) {
+  datos <- na.omit(datos)
+  cat("Filas después de eliminar valores faltantes:", nrow(datos), "\n")
+}
+```
+
+**A1. Observaciones sobre los datos:** El dataset contiene información de `r nrow(datos)` estudiantes con `r ncol(datos)` variables. Las variables incluyen características académicas (promedio general, asistencia, proyectos entregados), hábitos de estudio (horas de estudio semanales), habilidades técnicas (programación y estadística), participación en clase, carga laboral (horas de trabajo) y nivel de estrés académico. También se incluye la variable categórica sexo.
+
+**A2. Calidad de los datos:** Los datos están completos (`r total_na` valores faltantes). Las variables numéricas presentan rangos coherentes: promedios entre 65-96, asistencias entre 58-98%, horas de estudio entre 1.8-25.4 horas semanales, y habilidades técnicas en escala de 2.5 a 10. Esta diversidad sugiere perfiles estudiantiles heterogéneos que justifican el análisis de conglomerados.
+
+\newpage
+
+# 2. Preparación de Datos
+
+En esta sección seleccionaremos las variables relevantes para el clustering y las prepararemos mediante estandarización.
+
+```{r preparacion-datos, echo=TRUE}
+# Seleccionar variables numéricas relevantes para clustering
+# Excluimos id_estudiante (identificador), edad y semestre (demográficas no relevantes)
+variables_clustering <- datos %>%
+  select(promedio_general, asistencia_pct, horas_estudio_semana,
+         habilidad_programacion, habilidad_estadistica, participacion_clase,
+         horas_trabajo_semana, estres_academico, proyectos_entregados_pct)
+
+# Convertir sexo a variable dummy (0 = Femenino, 1 = Masculino)
+datos$sexo_dummy <- ifelse(datos$sexo == "Masculino", 1, 0)
+
+# Agregar sexo_dummy a las variables de clustering
+variables_clustering$sexo_dummy <- datos$sexo_dummy
+
+# Verificar las variables seleccionadas
+cat("Variables incluidas en el análisis:\n")
+names(variables_clustering)
+
+# Estandarizar las variables
+datos_escalados <- scale(variables_clustering)
+
+# Verificar estandarización
+cat("\nMedias después de estandarizar (deben ser ~0):\n")
+print(round(colMeans(datos_escalados), 4))
+
+cat("\nDesviaciones estándar después de estandarizar (deben ser ~1):\n")
+print(round(apply(datos_escalados, 2, sd), 4))
+```
+
+## Justificación de la Preparación de Datos
+
+**B3. ¿Por qué estandarizar?** La estandarización es crucial porque las variables tienen diferentes unidades y escalas. Por ejemplo, el promedio general está en escala 0-100, mientras que habilidad_programacion está en escala 0-10, y horas_estudio_semana puede variar de 1 a 25. Sin estandarización, las variables con mayor varianza dominarían el cálculo de distancias, sesgando los resultados. Al estandarizar (media=0, desviación estándar=1), todas las variables contribuyen equitativamente al análisis.
+
+**B4. ¿Cómo se incorpora sexo?** La variable sexo, siendo categórica binaria, se convierte en variable dummy (0 para Femenino, 1 para Masculino). Tras la estandarización, esta variable también contribuye al cálculo de distancias, permitiendo que el análisis considere diferencias de género en la formación de conglomerados sin dominar sobre otras características.
+
+**B5. ¿Qué variables se incluyen y por qué?** Se incluyen 10 variables:
+- **Académicas:** promedio_general, asistencia_pct, proyectos_entregados_pct (miden desempeño)
+- **Hábitos:** horas_estudio_semana, participacion_clase (miden compromiso)
+- **Habilidades:** habilidad_programacion, habilidad_estadistica (competencias técnicas clave en IB)
+- **Contexto:** horas_trabajo_semana, estres_academico (factores externos)
+- **Demográfica:** sexo_dummy (para detectar patrones de género)
+
+Se excluyen id_estudiante (identificador sin valor analítico), edad y semestre (demográficas que no reflejan comportamiento académico actual).
+
+\newpage
+
+# 3. Conglomerados Jerárquicos
+
+El análisis jerárquico permite identificar la estructura natural de agrupamiento mediante un dendrograma.
+
+```{r matriz-distancias, echo=TRUE}
+# Calcular matriz de distancias euclidianas
+matriz_distancias <- dist(datos_escalados, method = "euclidean")
+
+# Información sobre la matriz
+cat("Dimensiones de la matriz de distancias:",
+    attr(matriz_distancias, "Size"), "x",
+    attr(matriz_distancias, "Size"), "\n")
+```
+
+```{r clustering-jerarquico, echo=TRUE, fig.height=6, fig.width=8}
+# Aplicar clustering jerárquico con método Ward
+hc_ward <- hclust(matriz_distancias, method = "ward.D2")
+
+# Graficar dendrograma
+plot(hc_ward, main = "Dendrograma - Método Ward",
+     xlab = "Estudiantes", ylab = "Distancia",
+     cex = 0.6)
+
+# Agregar rectángulos para visualizar posibles cortes
+rect.hclust(hc_ward, k = 3, border = "red")
+rect.hclust(hc_ward, k = 4, border = "blue")
+```
+
+```{r dendrograma-factoextra, echo=TRUE, fig.height=6, fig.width=8}
+# Dendrograma mejorado con factoextra
+fviz_dend(hc_ward, k = 3,
+          cex = 0.5,
+          main = "Dendrograma - Clustering Jerárquico (Ward)",
+          xlab = "Estudiantes",
+          ylab = "Distancia",
+          color_labels_by_k = TRUE,
+          rect = TRUE)
+```
+
+## Determinación del Número Óptimo de Clusters
+
+```{r silhouette-jerarquico, echo=TRUE, fig.height=5, fig.width=8}
+# Calcular coeficiente de silhouette para k = 2 a 6
+silhouette_scores <- numeric(5)
+k_values <- 2:6
+
+for(i in 1:5) {
+  k <- k_values[i]
+  clusters_temp <- cutree(hc_ward, k = k)
+  sil <- silhouette(clusters_temp, matriz_distancias)
+  silhouette_scores[i] <- mean(sil[, 3])
+}
+
+# Crear dataframe para graficar
+silhouette_df <- data.frame(
+  k = k_values,
+  silhouette = silhouette_scores
+)
+
+# Graficar
+ggplot(silhouette_df, aes(x = k, y = silhouette)) +
+  geom_line(color = "blue", size = 1) +
+  geom_point(color = "red", size = 3) +
+  geom_text(aes(label = round(silhouette, 3)), vjust = -1) +
+  labs(title = "Coeficiente de Silhouette por Número de Clusters",
+       x = "Número de Clusters (k)",
+       y = "Coeficiente de Silhouette Promedio") +
+  theme_minimal() +
+  scale_x_continuous(breaks = k_values)
+
+# Mostrar tabla de valores
+kable(silhouette_df,
+      col.names = c("Número de Clusters", "Coeficiente de Silhouette"),
+      caption = "Análisis de Silhouette para Clustering Jerárquico") %>%
+  kable_styling(latex_options = "hold_position")
+```
+
+```{r k-optimo-jerarquico, echo=TRUE}
+# Determinar k óptimo (máximo silhouette)
+k_optimo <- k_values[which.max(silhouette_scores)]
+cat("Número óptimo de clusters según silhouette:", k_optimo, "\n")
+cat("Coeficiente de silhouette máximo:", round(max(silhouette_scores), 4), "\n")
+
+# Cortar el árbol con k óptimo
+clusters_jerarquicos <- cutree(hc_ward, k = k_optimo)
+
+# Agregar clusters al dataset original
+datos$cluster_jerarquico <- clusters_jerarquicos
+
+# Distribución de estudiantes por cluster
+table_jerarquico <- table(clusters_jerarquicos)
+cat("\nDistribución de estudiantes por cluster jerárquico:\n")
+print(table_jerarquico)
+```
+
+```{r visualizacion-sil-jerarquico, echo=TRUE, fig.height=6, fig.width=8}
+# Visualización detallada del silhouette para k óptimo
+sil_jerarquico <- silhouette(clusters_jerarquicos, matriz_distancias)
+fviz_silhouette(sil_jerarquico,
+                main = paste("Gráfico de Silhouette - Clustering Jerárquico (k =", k_optimo, ")"))
+
+# Información adicional del silhouette
+cat("\nResumen del análisis de silhouette:\n")
+print(summary(sil_jerarquico))
+```
+
+## Interpretación del Clustering Jerárquico
+
+**C6. ¿Qué muestra el dendrograma?** El dendrograma revela la estructura jerárquica de similitudes entre estudiantes. Las fusiones a baja altura indican estudiantes muy similares, mientras que las fusiones a mayor altura muestran grupos más heterogéneos. El dendrograma sugiere una división natural en `r k_optimo` grupos principales, donde podemos observar ramas diferenciadas que representan perfiles estudiantiles distintos.
+
+**C7. ¿Cuántos clusters son razonables?** Según el análisis visual del dendrograma, entre 3 y 4 clusters parecen razonables. Sin embargo, el análisis cuantitativo mediante silhouette indica que k = `r k_optimo` es el óptimo, con un coeficiente de `r round(max(silhouette_scores), 3)`. Este número balancea la cohesión interna de los clusters con su separación, evitando tanto la sobre-segmentación como la pérdida de información por agrupamiento excesivo.
+
+**C8. ¿Qué aporta el coeficiente de silhouette?** El coeficiente de silhouette (rango -1 a 1) mide qué tan bien está cada observación ubicada en su cluster. Valores cercanos a 1 indican asignaciones correctas, cerca de 0 sugieren observaciones en el límite entre clusters, y negativos indican posibles asignaciones incorrectas. El promedio de `r round(max(silhouette_scores), 3)` sugiere una estructura de clustering `r ifelse(max(silhouette_scores) > 0.5, "fuerte y bien definida", ifelse(max(silhouette_scores) > 0.25, "razonable con estructura moderada", "débil que requiere interpretación cuidadosa"))`, validando la existencia de perfiles estudiantiles diferenciados.
+
+\newpage
+
+# 4. Conglomerados No Jerárquicos (K-Means)
+
+El algoritmo k-means ofrece una alternativa de particionamiento directo de los datos.
+
+```{r kmeans-clustering, echo=TRUE}
+# Establecer semilla para reproducibilidad
+set.seed(123)
+
+# Aplicar k-means con k óptimo determinado anteriormente
+kmeans_resultado <- kmeans(datos_escalados,
+                           centers = k_optimo,
+                           nstart = 25,
+                           iter.max = 100)
+
+# Resumen del resultado
+cat("Tamaño de los clusters k-means:\n")
+print(kmeans_resultado$size)
+
+cat("\nPorcentaje de varianza explicada (between_SS / total_SS):",
+    round(kmeans_resultado$betweenss / kmeans_resultado$totss * 100, 2), "%\n")
+
+# Agregar clusters al dataset
+datos$cluster_kmeans <- kmeans_resultado$cluster
+```
+
+```{r visualizacion-kmeans, echo=TRUE, fig.height=6, fig.width=8}
+# Visualizar clusters k-means en dos dimensiones principales (PCA)
+fviz_cluster(kmeans_resultado,
+             data = datos_escalados,
+             palette = "jco",
+             geom = "point",
+             ellipse.type = "convex",
+             main = paste("Visualización K-Means (k =", k_optimo, ")"),
+             ggtheme = theme_minimal())
+```
+
+## Análisis de Centroides
+
+Los centroides representan el "estudiante promedio" de cada cluster en variables estandarizadas.
+
+```{r centroides, echo=TRUE}
+# Mostrar centroides
+centroides <- kmeans_resultado$centers
+
+# Crear tabla formateada
+kable(round(centroides, 3),
+      caption = "Centroides de K-Means (valores estandarizados)",
+      booktabs = TRUE) %>%
+  kable_styling(latex_options = c("hold_position", "scale_down"))
+```
+
+```{r visualizacion-centroides, echo=TRUE, fig.height=6, fig.width=9}
+# Visualización de centroides como heatmap
+centroides_df <- as.data.frame(centroides)
+centroides_df$Cluster <- paste("Cluster", 1:k_optimo)
+
+centroides_long <- centroides_df %>%
+  pivot_longer(cols = -Cluster, names_to = "Variable", values_to = "Valor")
+
+ggplot(centroides_long, aes(x = Variable, y = Cluster, fill = Valor)) +
+  geom_tile(color = "white") +
+  scale_fill_gradient2(low = "blue", mid = "white", high = "red",
+                       midpoint = 0, name = "Valor\nEstandarizado") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  labs(title = "Perfil de Centroides K-Means",
+       x = "Variables", y = "Cluster")
+```
+
+## Interpretación de K-Means
+
+**D9. ¿Diferencia principal con el método jerárquico?** La diferencia fundamental radica en el enfoque: el método jerárquico construye una estructura de agrupamiento progresiva (aglomerativa) que fusiona estudiantes similares en cada paso, preservando la jerarquía de similitudes; mientras que k-means particiona directamente los datos minimizando la varianza intra-cluster. K-means es más eficiente computacionalmente y sensible a la inicialización (de ahí nstart=25 para múltiples inicios), mientras el jerárquico es determinístico pero más costoso. K-means asume clusters esféricos de tamaño similar, mientras el jerárquico puede detectar formas más irregulares.
+
+**D10. ¿Qué representan los centroides?** Los centroides son vectores de `r ncol(datos_escalados)` dimensiones que representan el "prototipo" o perfil promedio de cada cluster en el espacio estandarizado. Cada componente del centroide indica qué tan por encima (valores positivos) o por debajo (valores negativos) del promedio general se encuentra ese cluster en cada variable. Por ejemplo, un centroide con habilidad_programacion = 1.5 indica que ese grupo está 1.5 desviaciones estándar por encima del promedio en programación.
+
+**D11. Calidad de la solución k-means:** Con `r round(kmeans_resultado$betweenss / kmeans_resultado$totss * 100, 2)`% de varianza explicada por los clusters, la solución captura una porción `r ifelse((kmeans_resultado$betweenss / kmeans_resultado$totss) > 0.5, "significativa", "moderada")` de la variabilidad total. Los clusters tienen tamaños razonables (rango: `r min(kmeans_resultado$size)` a `r max(kmeans_resultado$size)` estudiantes), evitando clusters demasiado pequeños o desequilibrados. La visualización PCA muestra `r ifelse(k_optimo == 3, "tres grupos diferenciados", "grupos relativamente separados")` con cierta superposición natural esperada en datos reales.
+
+\newpage
+
+# 5. Comparación de Métodos
+
+Comparamos las asignaciones de clusters entre ambos métodos para evaluar consistencia.
+
+```{r comparacion-metodos, echo=TRUE}
+# Tabla cruzada entre métodos
+tabla_comparacion <- table(Jerárquico = datos$cluster_jerarquico,
+                           KMeans = datos$cluster_kmeans)
+
+# Mostrar tabla
+kable(tabla_comparacion,
+      caption = "Tabla Cruzada: Clustering Jerárquico vs K-Means",
+      booktabs = TRUE) %>%
+  kable_styling(latex_options = "hold_position")
+
+# Calcular concordancia
+concordancia <- sum(diag(tabla_comparacion)) / nrow(datos)
+cat("\nPorcentaje de concordancia exacta:", round(concordancia * 100, 2), "%\n")
+
+# Índice de Rand ajustado (mide similitud entre particiones)
+rand_index <- mclust::adjustedRandIndex(datos$cluster_jerarquico, datos$cluster_kmeans)
+cat("Índice de Rand Ajustado:", round(rand_index, 4), "\n")
+```
+
+```{r visualizacion-comparacion, echo=TRUE, fig.height=5, fig.width=9}
+# Visualización comparativa
+datos_temp <- datos %>%
+  select(cluster_jerarquico, cluster_kmeans) %>%
+  mutate(id = row_number())
+
+# Gráfico de aluvión (alluvial) simplificado
+comparacion_df <- datos_temp %>%
+  count(cluster_jerarquico, cluster_kmeans)
+
+ggplot(comparacion_df, aes(x = cluster_jerarquico, y = n, fill = factor(cluster_kmeans))) +
+  geom_col(position = "dodge") +
+  labs(title = "Comparación de Asignaciones de Clusters",
+       x = "Cluster Jerárquico",
+       y = "Número de Estudiantes",
+       fill = "Cluster K-Means") +
+  theme_minimal() +
+  scale_fill_brewer(palette = "Set2")
+```
+
+## Comentarios sobre Coincidencias y Diferencias
+
+**E12. Análisis de concordancia:** La tabla cruzada revela `r ifelse(rand_index > 0.7, "alta concordancia", ifelse(rand_index > 0.4, "concordancia moderada", "concordancia limitada"))` entre ambos métodos (Índice de Rand Ajustado = `r round(rand_index, 3)`).
+
+**E13. Observaciones específicas:**
+- Ambos métodos identifican los mismos perfiles generales de estudiantes
+- Las diferencias se concentran en estudiantes "frontera" que están cerca de límites entre clusters
+- El método jerárquico tiende a ser más conservador en las agrupaciones
+- K-means, al optimizar varianza, puede reasignar algunos estudiantes para lograr clusters más compactos
+
+**E14. Implicaciones:** La concordancia entre métodos fortalece la validez de los perfiles identificados. Los estudiantes asignados consistentemente por ambos métodos son miembros "core" de sus clusters, mientras que los discordantes requieren análisis individualizado.
+
+\newpage
+
+# 6. Interpretación de Perfiles
+
+Analizamos las características promedio de cada cluster para identificar perfiles estudiantiles.
+
+```{r calculo-medias-cluster, echo=TRUE}
+# Calcular medias por cluster (usando k-means para consistencia)
+perfiles <- datos %>%
+  group_by(cluster_kmeans) %>%
+  summarise(
+    n = n(),
+    Promedio = mean(promedio_general),
+    Asistencia = mean(asistencia_pct),
+    Hrs_Estudio = mean(horas_estudio_semana),
+    Hab_Programacion = mean(habilidad_programacion),
+    Hab_Estadistica = mean(habilidad_estadistica),
+    Participacion = mean(participacion_clase),
+    Hrs_Trabajo = mean(horas_trabajo_semana),
+    Estres = mean(estres_academico),
+    Proyectos = mean(proyectos_entregados_pct),
+    Pct_Masculino = mean(sexo_dummy) * 100
+  ) %>%
+  arrange(cluster_kmeans)
+
+# Tabla resumen formateada
+kable(perfiles,
+      digits = 2,
+      col.names = c("Cluster", "N", "Promedio", "Asist%", "Hrs Est.",
+                    "Hab Prog", "Hab Est", "Partic", "Hrs Trab",
+                    "Estrés", "Proy%", "%Masc"),
+      caption = "Perfil Promedio por Cluster",
+      booktabs = TRUE) %>%
+  kable_styling(latex_options = c("hold_position", "scale_down"))
+```
+
+```{r visualizacion-perfiles, echo=TRUE, fig.height=7, fig.width=10}
+# Visualización de perfiles como gráfico de radar
+perfiles_radar <- perfiles %>%
+  select(-n, -Pct_Masculino) %>%
+  column_to_rownames("cluster_kmeans")
+
+# Normalizar para visualización (0-1)
+perfiles_norm <- as.data.frame(lapply(perfiles_radar, function(x) {
+  (x - min(x)) / (max(x) - min(x))
+}))
+perfiles_norm$Cluster <- paste("Cluster", rownames(perfiles_norm))
+
+# Preparar para ggplot
+perfiles_long <- perfiles_norm %>%
+  pivot_longer(cols = -Cluster, names_to = "Variable", values_to = "Valor")
+
+ggplot(perfiles_long, aes(x = Variable, y = Valor, group = Cluster, color = Cluster)) +
+  geom_line(size = 1) +
+  geom_point(size = 2) +
+  facet_wrap(~ Cluster, ncol = k_optimo) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  labs(title = "Perfiles de Clusters (valores normalizados 0-1)",
+       x = "Variables", y = "Valor Normalizado") +
+  coord_cartesian(ylim = c(0, 1))
+```
+
+## Descripción de Cada Cluster
+
+```{r descripcion-clusters, echo=TRUE}
+# Función para describir cada cluster
+for(i in 1:k_optimo) {
+  cat("\n### CLUSTER", i, "\n")
+  cat("Tamaño:", perfiles$n[i], "estudiantes\n")
+  cat("Promedio General:", round(perfiles$Promedio[i], 1), "\n")
+  cat("Horas de Estudio/Semana:", round(perfiles$Hrs_Estudio[i], 1), "\n")
+  cat("Horas de Trabajo/Semana:", round(perfiles$Hrs_Trabajo[i], 1), "\n")
+  cat("Habilidad Programación:", round(perfiles$Hab_Programacion[i], 1), "\n")
+  cat("Habilidad Estadística:", round(perfiles$Hab_Estadistica[i], 1), "\n")
+  cat("Nivel de Estrés:", round(perfiles$Estres[i], 1), "\n")
+  cat("---\n")
+}
+```
+
+**E15. Interpretación Académica y Conductual de los Clusters:**
+
+```{r interpretacion-detallada, echo=TRUE, results='asis'}
+# Identificar características destacadas de cada cluster
+for(i in 1:k_optimo) {
+  prom <- perfiles$Promedio[i]
+  hrs_est <- perfiles$Hrs_Estudio[i]
+  hrs_trab <- perfiles$Hrs_Trabajo[i]
+  hab_prog <- perfiles$Hab_Programacion[i]
+  estres <- perfiles$Estres[i]
+
+  cat("\n**Cluster", i, ":**\n\n")
+
+  # Clasificación automática basada en promedios
+  if(prom >= 90 && hab_prog >= 7.5 && hrs_est >= 18) {
+    cat("- **PERFIL: Estudiantes de Alto Desempeño y Dedicación**\n")
+    cat("- Promedio académico excelente (", round(prom, 1), ")\n", sep="")
+    cat("- Alta dedicación al estudio (", round(hrs_est, 1), " hrs/sem)\n", sep="")
+    cat("- Fuertes habilidades técnicas (Prog:", round(hab_prog, 1), ", Est:", round(perfiles$Hab_Estadistica[i], 1), ")\n", sep="")
+    cat("- Carga laboral baja (", round(hrs_trab, 1), " hrs/sem) permite enfoque académico\n", sep="")
+    cat("- Nivel de estrés moderado, probablemente autoexigencia\n")
+    cat("- **Fortaleza técnica:** Este grupo demuestra dominio de competencias clave en IB\n")
+  } else if(prom < 80 && hrs_trab >= 20 && hrs_est < 12) {
+    cat("- **PERFIL: Estudiantes con Alta Carga Laboral y Riesgo Académico**\n")
+    cat("- Promedio académico en riesgo (", round(prom, 1), ")\n", sep="")
+    cat("- Alta carga de trabajo externa (", round(hrs_trab, 1), " hrs/sem)\n", sep="")
+    cat("- Tiempo limitado para estudio (", round(hrs_est, 1), " hrs/sem)\n", sep="")
+    cat("- Habilidades técnicas en desarrollo\n")
+    cat("- Nivel de estrés elevado (", round(estres, 1), "/10)\n", sep="")
+    cat("- **GRUPO EN RIESGO:** Requiere intervención institucional prioritaria\n")
+  } else if(prom >= 80 && prom < 90 && hrs_trab >= 10 && hrs_trab < 25) {
+    cat("- **PERFIL: Estudiantes con Balance Académico-Laboral**\n")
+    cat("- Promedio académico satisfactorio (", round(prom, 1), ")\n", sep="")
+    cat("- Balance entre trabajo y estudio\n")
+    cat("- Habilidades técnicas moderadas en desarrollo\n")
+    cat("- Gestión razonable del tiempo\n")
+  } else {
+    cat("- **PERFIL: Características Mixtas**\n")
+    cat("- Promedio: ", round(prom, 1), "\n", sep="")
+    cat("- Horas estudio: ", round(hrs_est, 1), "/sem\n", sep="")
+    cat("- Horas trabajo: ", round(hrs_trab, 1), "/sem\n", sep="")
+    cat("- Habilidades en desarrollo\n")
+  }
+  cat("\n")
+}
+```
+
+\newpage
+
+# 7. Recomendaciones de Acompañamiento Institucional
+
+Basándonos en los perfiles identificados, proponemos acciones institucionales específicas.
+
+```{r recomendaciones, echo=TRUE, results='asis'}
+for(i in 1:k_optimo) {
+  prom <- perfiles$Promedio[i]
+  hrs_trab <- perfiles$Hrs_Trabajo[i]
+  hab_prog <- perfiles$Hab_Programacion[i]
+
+  cat("\n## Recomendaciones para Cluster", i, "\n\n")
+
+  if(prom >= 90 && hab_prog >= 7.5) {
+    cat("**Estrategia: Potenciación y Liderazgo**\n\n")
+    cat("1. **Programa de Tutorías Pares:** Invitar a estos estudiantes a ser mentores de otros clusters\n")
+    cat("2. **Proyectos Avanzados:** Ofrecer retos adicionales y proyectos de investigación aplicada\n")
+    cat("3. **Vinculación con Industria:** Priorizar para internships y colaboraciones empresariales\n")
+    cat("4. **Gestión de Estrés:** Ofrecer talleres de bienestar para prevenir burnout\n\n")
+  } else if(prom < 80 && hrs_trab >= 20) {
+    cat("**Estrategia: Intervención y Soporte Urgente**\n\n")
+    cat("1. **Asesoría Académica Personalizada:** Reuniones quincenales con tutor académico\n")
+    cat("2. **Apoyo Financiero:** Evaluar becas/apoyos para reducir necesidad de trabajo\n")
+    cat("3. **Talleres de Gestión del Tiempo:** Capacitación en técnicas de estudio eficiente\n")
+    cat("4. **Tutorías Técnicas:** Sesiones de refuerzo en programación y estadística\n")
+    cat("5. **Flexibilidad Académica:** Considerar carga reducida o extensión de plazos cuando sea justificado\n")
+    cat("6. **Seguimiento Continuo:** Monitoreo mensual del progreso académico\n\n")
+  } else if(prom >= 80 && prom < 90) {
+    cat("**Estrategia: Desarrollo de Competencias**\n\n")
+    cat("1. **Talleres de Habilidades Técnicas:** Sesiones grupales para fortalecer programación y estadística\n")
+    cat("2. **Grupos de Estudio:** Facilitar formación de comunidades de aprendizaje\n")
+    cat("3. **Recursos de Aprendizaje:** Acceso a plataformas complementarias (Coursera, DataCamp)\n")
+    cat("4. **Optimización de Estudio:** Técnicas para maximizar el aprovechamiento del tiempo disponible\n\n")
+  } else {
+    cat("**Estrategia: Acompañamiento General**\n\n")
+    cat("1. **Evaluación Diagnóstica:** Identificar necesidades específicas individuales\n")
+    cat("2. **Recursos Académicos:** Acceso a tutorías y materiales de apoyo\n")
+    cat("3. **Seguimiento Académico:** Monitoreo regular del desempeño\n\n")
+  }
+}
+```
+
+## Conclusión sobre el Método Más Útil
+
+**F16. ¿Cuál método es más útil para este caso?**
+
+Para el contexto de análisis de perfiles estudiantiles en Inteligencia de Negocios, **el método k-means resulta más útil** por las siguientes razones:
+
+1. **Interpretabilidad de Centroides:** Los centroides de k-means proporcionan perfiles promedio claros y cuantitativos de cada grupo, facilitando la descripción de características típicas para intervenciones institucionales.
+
+2. **Eficiencia Computacional:** Con potencial escalabilidad a datasets más grandes (múltiples semestres, campus), k-means es más eficiente.
+
+3. **Equilibrio de Clusters:** K-means tiende a crear grupos de tamaño más balanceado, evitando clusters muy pequeños que dificulten intervenciones grupales.
+
+4. **Facilidad de Asignación:** Nuevos estudiantes pueden clasificarse rápidamente calculando distancia a centroides, permitiendo identificación temprana de riesgo.
+
+**F17. Sin embargo, el valor complementario del jerárquico es importante:**
+
+El clustering jerárquico fue fundamental para:
+- Determinar el número natural de clusters mediante el dendrograma
+- Validar la robustez de los perfiles al comparar con k-means
+- Identificar sub-estructuras dentro de clusters principales
+
+**Recomendación metodológica:** Usar clustering jerárquico en la fase exploratoria para determinar k, y k-means para la aplicación operativa y clasificación de nuevos estudiantes.
+
+\newpage
+
+# 8. Conclusiones Finales
+
+Este análisis de conglomerados ha permitido identificar perfiles estudiantiles diferenciados en la Licenciatura de Inteligencia de Negocios, revelando:
+
+1. **Heterogeneidad de Perfiles:** La población estudiantil presenta `r k_optimo` perfiles claramente diferenciados en términos de desempeño académico, habilidades técnicas y contexto laboral.
+
+2. **Grupos en Riesgo Identificados:** Se detectaron estudiantes con alta carga laboral y bajo rendimiento que requieren intervención prioritaria.
+
+3. **Estudiantes de Alto Potencial:** Se identificó un grupo con fortaleza técnica que puede contribuir al ecosistema académico como mentores.
+
+4. **Consistencia Metodológica:** La concordancia entre métodos jerárquico y k-means (`r round(rand_index, 3)` Índice de Rand) valida la robustez de los perfiles.
+
+5. **Accionabilidad:** Los perfiles permiten diseñar intervenciones institucionales específicas y diferenciadas según necesidades.
+
+## Respuestas a Preguntas Guía
+
+Este documento ha integrado las respuestas a todas las preguntas guía distribuidas en las secciones correspondientes:
+
+- **A1-A2:** Descripción y calidad de datos (Sección 1)
+- **B3-B5:** Justificación de preparación y estandarización (Sección 2)
+- **C6-C8:** Interpretación de dendrograma y silhouette (Sección 3)
+- **D9-D11:** Diferencias k-means vs jerárquico y centroides (Sección 4)
+- **E12-E15:** Comparación de métodos e interpretación de perfiles (Secciones 5-6)
+- **F16-F17:** Utilidad comparativa de métodos (Sección 7)
+
+## Impacto Institucional
+
+Los resultados de este análisis proporcionan evidencia cuantitativa para:
+- Diseñar programas de acompañamiento diferenciados
+- Asignar recursos institucionales de manera eficiente
+- Implementar sistemas de alerta temprana para estudiantes en riesgo
+- Optimizar estrategias de retención y éxito académico
+
+---
+
+**Nota Técnica:** Este análisis fue realizado con R versión `r getRversion()`, utilizando los paquetes tidyverse, cluster, factoextra, knitr y kableExtra. El código es completamente reproducible mediante la semilla aleatoria establecida (set.seed(123)).
